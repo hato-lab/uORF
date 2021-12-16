@@ -1,0 +1,112 @@
+module load samtools
+
+fileArray=(Control_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam \
+Cyto_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam \
+IFNa_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam)
+
+## subset out INS regions and convert to a bed file (-f 16 to select negative strands only for INS)
+## bamtobed -split to split spliced reads 
+for i in ${fileArray[@]}; do samtools view -bf 16 ${i} "chr11:2159700-2161300" | bedtools bamtobed -split -i stdin \
+> ${i}_split.bed ; done
+
+## filtering for chr, strand and region are already done by samtools above, so redundant here)
+
+fileArray=(Control_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed \
+Cyto_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed \
+IFNa_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed)
+
+for i in ${fileArray[@]}; do awk 'BEGIN{FS="\t";OFS="\t"} \
+{if ( ($1 == "chr11") && ($2 > 2159700) && ($3 < 2161300) && ($5 > 100) && ($6 == "-")){print $0}}' `echo ${i}` \
+> ${i}_INS.tsv ; done 
+
+fileArray=(Control_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed_INS.tsv \
+Cyto_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed_INS.tsv \
+IFNa_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed_INS.tsv)
+
+## assign periodicity for each codon (from 5' end of Insulin gene). $7 is for reads width.
+for i in ${fileArray[@]}; do awk 'BEGIN{FS="\t";OFS="\t"} \
+((2161209 - $3) % 3) == 0{ print $1,$2,$3,0,$5,$6,($3 - $2)} \
+((2161209 - $3) % 3) == 1{ print $1,$2,$3,1,$5,$6,($3 - $2)} \
+((2161209 - $3) % 3) == 2{ print $1,$2,$3,2,$5,$6,($3 - $2)}' `echo ${i}` | \
+sort -k 2,2 > ${i}_frame.tsv ; done
+
+ls *frame.tsv | xargs -I '{}' scp '{}' ~/someotherplace
+
+
+## R 
+library(GenomicRanges); library(BiocGenerics); library(IRanges);
+
+test2 <- read.table("Control_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed_INS.tsv_frame.tsv", sep="\t", header = FALSE)
+test2 <- read.table("Cyto_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed_INS.tsv_frame.tsv", sep="\t", header = FALSE)
+test2 <- read.table("IFNa_rRNA_filtered_genome_aligned_Aligned.out_sorted.bam_split.bed_INS.tsv_frame.tsv", sep="\t", header = FALSE)
+
+filename <- "Control"
+filename <- "Cyto"
+filename <- "IFNa"
+
+# GRange object
+test2.gr <- GRanges(seqnames = Rle(
+	c(rep("INS", dim(test2)[1])), c(rep(1, dim(test2)[1]))),
+	ranges = IRanges(
+	start=test2[,2], 
+	width = test2[,7]),
+	strand = Rle(strand(c(rep("-", dim(test2)[1]))), c(rep(1, dim(test2)[1]))))	
+
+test2.gr$frame <- test2[,4]  ## adding metadata. 
+
+ylim.max <- 16000  ## max(as.vector(coverage(test2.gr)[[1]])) 
+
+pdf(file=paste0(filename, ".pdf"), width=6, height=4, useDingbats=FALSE)
+	
+	test2.gr_cov.frameN <- coverage(test2.gr[test2.gr$frame == 0]) 
+	if(sum(test2.gr@elementMetadata@listData$frame == 0) > 1){
+		matplot(
+		c(1:(length(as.vector(test2.gr_cov.frameN[[1]])))), 
+		as.vector(test2.gr_cov.frameN[[1]]),
+		type="h", 
+		xlim = c(2159700, 2161300), 
+		ylim = c(2, ylim.max), 
+		axes=FALSE, ann=FALSE, col=rgb(red=1,green=0,blue=0,alpha=0.2), add=FALSE)
+	}
+	
+	test2.gr_cov.frameN <- coverage(test2.gr[test2.gr$frame == 1]) 
+	if(sum(test2.gr@elementMetadata@listData$frame == 1) > 1){
+		matplot(
+		c(1:(length(as.vector(test2.gr_cov.frameN[[1]])))), 
+		as.vector(test2.gr_cov.frameN[[1]]),
+		type="h", 
+		xlim = c(2159700, 2161300), 
+		ylim = c(2, ylim.max), 
+		axes=FALSE, ann=FALSE, col=rgb(red=0,green=1,blue=0,alpha=0.2), add=TRUE)
+	}
+	
+	test2.gr_cov.frameN <- coverage(test2.gr[test2.gr$frame == 2]) 
+	if(sum(test2.gr@elementMetadata@listData$frame == 2) > 1){
+		matplot(
+		c(1:(length(as.vector(test2.gr_cov.frameN[[1]])))), 
+		as.vector(test2.gr_cov.frameN[[1]]),
+		type="h", 
+		xlim = c(2159700, 2161300), 
+		ylim = c(2, ylim.max), 
+		axes=FALSE, ann=FALSE, col=rgb(red=0,green=0,blue=1,alpha=0.2), add=TRUE)
+	}
+
+	matlines(c(2161168, 2161209), c(ylim.max,ylim.max), type="l", lwd = 2, col="black")
+	matlines(c(2160785, 2160988), c(ylim.max,ylim.max), type="l", lwd = 2, col="black")
+	matlines(c(2159779, 2159997), c(ylim.max,ylim.max), type="l", lwd = 2, col="black")
+
+	matlines(c(2161142, 2161221), c(ylim.max-1000,ylim.max-1000), type="l", lwd = 2, col="black")
+	matlines(c(2160785, 2160988), c(ylim.max-1000,ylim.max-1000), type="l", lwd = 2, col="black")
+	matlines(c(2159779, 2159997), c(ylim.max-1000,ylim.max-1000), type="l", lwd = 2, col="black")
+
+	matlines(c(2160785, 2161204), c(ylim.max-500,ylim.max-500), type="l", lwd = 2, col="black")
+	matlines(c(2159779, 2159997), c(ylim.max-500,ylim.max-500), type="l", lwd = 2, col="black")
+
+	axis(side=1, at=c(2100000, 2159852, 2160971, 2200000), labels=F, tick=T, lwd=1)
+	mtext(c("stop", "start"), side=1, las=2, line=0.5, cex=0.7, at=c(2159852, 2160971))
+	
+	axis(side=2, at=c(-10, 5000,10000, 15000, 10000), labels=F, tick=T, lwd=1);
+	mtext(c("5000", "10000", "15000"), side=2, line=0.5, cex=0.7, at=c(5000,10000, 15000))
+	
+dev.off()
+
