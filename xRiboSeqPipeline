@@ -1,0 +1,162 @@
+#!/bin/bash
+#!/usr/bin/
+set -euo pipefail
+
+#pipeline script for mapping and getting analysis for riboseq
+module load python/2.7.16
+module load cutadapt
+module load bowtie
+module load samtools/1.9
+module load bedtools/gnu/2.26.0
+module load r/3.6.0
+# Trim the riboseq adapters from the raw reads.
+# This is taken from https://perkinelmer-appliedgenomics.com/wp-content/uploads/marketing/NEXTFLEX/miRNA/NEXTflex_Small_RNA_v3_Trimming_Instructions.pdf
+# Trim the common adapter if it is long enough (excludes inserts less than 15 bases).
+
+#mkdir FASTQ
+#echo "###### copying FASTQ files to new directory #######"
+#cp ./ILMN*/* ./FASTQ
+#echo "###### trimming FASTQ files #######"
+for FASTQ in FASTQ/*.gz;
+do cutadapt -a TGGAATTCTCGGGTGCCAAGG -o ${FASTQ%%_S*}.trim1.fq --minimum-length 23 ${FASTQ} | tee ${FASTQ%%_S*}.trim1.log;
+
+# Trim 4 bases from each end.
+cutadapt -u 4 -u -4 -o ${FASTQ%%_S*}.trim2.fq ${FASTQ%%_S*}.trim1.fq 2>&1 | tee ${FASTQ%%_S*}.trim2.log; done
+
+#make directories for analysis and move trim stats to directory
+mkdir ./Analysis
+mkdir ./Analysis/FASTQ
+mkdir ./Analysis/FASTQ/trimming
+mkdir ./Analysis/FASTQ/readslengths
+mv ./FASTQ/*.log ./Analysis/FASTQ/trimming
+mkdir ./rRNAaligned
+mkdir ./Analysis/rRNAaligned
+
+#get reads lengths for each sample
+echo "##### getting read lengths of trimmed files ######"
+for FQ in ./FASTQ/*trim2.fq; do STR1=${FQ##./FASTQ/};
+awk 'NR%4 == 2 {lengths[length($0)]++} END {for (l in lengths) {print l, lengths[l]}}' $FQ > ./Analysis/FASTQ/readslengths/${STR1%%.trim2.fq}_readlengths.txt; done
+
+#generate length plots
+echo "#####  generating read length plots to Analysis/FASTQ/readlengths #####"
+Rscript /N/project/hatoSlate2/RiboSeqPipeline/piesR/FASTQreadlength.R
+
+#aligns trimmed fqs to rRNA fasta
+
+echo "####### aligning trimmed FASTQ files to rRNAs ######"
+for FQ in ./FASTQ/*trim2.fq; do STR1=${FQ%%.trim2*}; STR2=${STR1##./FASTQ/}; 
+bowtie --threads 24 --sam -t -v 2 /N/project/hatoSlate/STARgenomes/Mouse/combinedncRNA/only4rRNAs $FQ ./rRNAaligned/${STR2}_4RNAs.sam --un ./rRNAaligned/${STR2}_rRNA_filtered.fastq 2>&1 | tee ./Analysis/rRNAaligned/${STR2}_4RNA_bowtieStep1_Stat.txt; done
+
+#convert rRNA aligned sam to bam
+echo "####### converting aligned rRNA sams to bams ######"
+for SAM in ./rRNAaligned/*_4RNAs.sam; do STR1=${SAM%%.sam}; 
+samtools view -@ 24 -bS $SAM > ${STR1}_unsorted.bam; 
+samtools sort -@ 24 -o ${STR1}_sorted.bam ${STR1}_unsorted.bam;
+samtools index ${STR1}_sorted.bam; done
+
+#get depths for each position split by strand
+echo "####### getting depth info from aligned rRNA reads ######"
+mkdir ./Analysis/rRNAaligned/readsDistribution
+for BAM in ./rRNAaligned/*_4RNAs_sorted.bam; do samtools view -F 16 -b -o ${BAM%%.bam}_positiveStrand.bam $BAM; samtools view -f 16 -b -o ${BAM%%.bam}_negativeStrand.bam $BAM; done
+for BAM in ./rRNAaligned/*positiveStrand.bam; do STR1=${BAM##./rRNAaligned/}; samtools depth -m 0 ${BAM} > ./Analysis/rRNAaligned/readsDistribution/${STR1%%_positiveStrand.bam}_forward_reads.txt; done
+for BAM2 in ./rRNAaligned/*negativeStrand.bam; do STR2=${BAM2##./rRNAaligned/}; samtools depth -m 0 ${BAM2} > ./Analysis/rRNAaligned/readsDistribution/${STR2%%_negativeStrand.bam}_reverse_reads.txt; done
+
+mkdir ./Analysis/mappingFigures
+echo "generating rRNA mapping figures to ./Analysis/mappingFigures"
+Rscript /N/project/hatoSlate2/RiboSeqPipeline/piesR/histrRNA.R
+
+
+#generate mito aligned and get depths
+echo "####### aligning mito regions using STAR ######"
+mkdir ./mitoAligned
+mkdir ./Analysis/mitoAligned
+mkdir ./Analysis/mitoAligned/Starstats
+for FQ in ./rRNAaligned/*rRNA_filtered.fastq; do STR1=${FQ%%.fastq}; echo $STR1;
+/N/project/hatoSlate/STARgenomes/STAR-2.7.1a/bin/Linux_x86_64/STAR --runThreadN 12 --genomeDir /N/project/hatoSlate/STARgenomes/Mouse/mito/STAR/ --readFilesIn $FQ --outFilterMismatchNmax 2 --outSAMattributes MD NH --outFilterMultimapNmax 1 --outFileNamePrefix ./mitoAligned/${STR1##./rRNAaligned/}_star_mito_filtered_; done
+mv ./mitoAligned/*Log.final* ./Analysis/mitoAligned/Starstats
+
+#Convert mito sam to bam
+echo "####### converting aligned mito sams to bams ######"
+for SAM in ./mitoAligned/*.sam; do STR1=${SAM%%.sam}; 
+samtools view -@ 24 -bS $SAM > ${STR1}_unsorted.bam; 
+samtools sort -@ 24 -o ${STR1}_sorted.bam ${STR1}_unsorted.bam;
+samtools index ${STR1}_sorted.bam; done
+
+#generate reads distribution for mito aligned data
+echo "####### getting depth info from aligned mito reads ######"
+
+mkdir ./Analysis/mitoAligned/readsDistribution
+for BAM in ./mitoAligned/*_sorted.bam; 
+do samtools view -F 16 -b -o ${BAM%%.bam}_positiveStrand.bam $BAM; samtools view -f 16 -b -o ${BAM%%.bam}_negativeStrand.bam $BAM; done
+for BAM in ./mitoAligned/*positiveStrand.bam; do STR1=${BAM##./mitoAligned/}; samtools depth -m 0 ${BAM} > ./Analysis/mitoAligned/readsDistribution/${STR1%%_positiveStrand.bam}_forward_reads.txt; done
+for BAM in ./mitoAligned/*negativeStrand.bam; do STR1=${BAM##./mitoAligned/}; samtools depth -m 0 ${BAM} > ./Analysis/mitoAligned/readsDistribution/${STR1%%_negativeStrand.bam}_reverse_reads.txt; done
+
+
+#generate mito figures
+echo "#########generating mito mapping figures to ./Analysis/mappingFigures#######"
+Rscript /N/project/hatoSlate2/RiboSeqPipeline/piesR/histmito.R
+
+
+
+#map rRNA filtered reads to genome usng STAR
+echo "####### aligning rRNA_filtered reads to genome using STAR ######"
+mkdir ./genomeAligned
+mkdir ./Analysis/genomeAligned
+mkdir ./Analysis/genomeAligned/Starstats
+for FQ in ./rRNAaligned/*_rRNA_filtered.fastq; do STR1=${FQ%%.fastq}; echo $STR1;
+/N/project/hatoSlate/STARgenomes/STAR-2.7.1a/bin/Linux_x86_64/STAR --runThreadN 24 --genomeDir /N/project/hatoSlate/STARgenomes/Mouse/Gencode23_Star/Genome/ --readFilesIn $FQ --outFilterMismatchNmax 2 --quantMode TranscriptomeSAM GeneCounts --outSAMattributes MD NH --outFilterMultimapNmax 4 --sjdbGTFfile /N/project/hatoSlate/STARgenomes/Mouse/Gencode23_Star/Genome/gencode.vM23.annotation.gtf --outFileNamePrefix ./genomeAligned/${STR1##./rRNAaligned/}_genome_aligned_; done
+mv ./genomeAligned/*Log.final* ./Analysis/genomeAligned/Starstats
+
+#convert genome aligned, rRNA filtered, reads from sam to bam
+echo "####### convert genome aligned rRNA_filtered reads from sam to bam ######"
+for SAM in ./genomeAligned/*.sam; do STR1=${SAM%%.sam}; 
+samtools view -@ 24 -bS $SAM > ${STR1}_unsorted.bam; 
+samtools sort -@ 24 -o ${STR1}_sorted.bam ${STR1}_unsorted.bam;
+samtools index ${STR1}_sorted.bam; done
+
+
+
+#bamutil on genome aligned, rRNA filtered reads
+echo "####### run bamutil on genome aligned rRNA_filtered reads ######"
+mkdir ./Analysis/genomeAligned/bamutil
+
+echo "run sh /N/project/hatoSlate2/RiboseqPipeline/xBamutil.sh manually"
+#for BAM in ./genomeAligned/*_sorted.bam; 
+#do python /N/u/jmyslins/Carbonate/.local/lib/python2.7/site-packages/ngsutils/bam/stats.py -all -gtf /N/project/hatoSlate/STARgenomes/Mouse/Gencode23_Star/Genome/gencode.vM23.annotation.gtf $BAM 2>&1 | tee ./Analysis/genomeAligned/bamutil/${BAM##./genomeAligned/}_bamutil_stats.txt; done
+
+##convert genome aligned, rRNA filtered bams to fastq
+echo "####### convert genome aligned rRNA_filtered reads from bam to fastq ######"
+for BAM in ./genomeAligned/*_genome*_sorted.bam; do STR1=${BAM%%_sorted.bam}; STR2=${STR1##./genomeAligned/}; echo $STR2;
+bedtools bamtofastq -i $BAM -fq ${STR1}_genome_bedtool.fastq; done
+echo "####### align genome aligned rRNA_filtered reads to transcriptome ######"
+mkdir ./transcriptomeAligned
+mkdir ./Analysis/transcriptomeAligned
+for FQ in ./genomeAligned/*bedtool.fastq; do STR1=${FQ%%_genome_bedtool.fastq}; echo $STR1; 
+bowtie --threads 24 -t -a -v 2 --sam /N/project/hatoSlate/STARgenomes/Mouse/Gencode23_Star/TranscriptBowtieMajorTranscripts/gencode23MajorTranscripts $FQ ./transcriptomeAligned/${STR1##./genomeAligned/}_transcriptome_aligned.sam 2>&1 | tee ./Analysis/transcriptomeAligned/${STR1##./genomeAligned/}_bowtieStep3Stat.txt; done
+
+##convert transcriptome aligned, genome filtered, rRNA filtered sam to bam
+echo "####### convert transcriptome aligned, genome filtered rRNA_filtered sam to bams ######"
+for SAM in ./transcriptomeAligned/*.sam; do STR1=${SAM%%.sam}; 
+samtools view -@ 24 -bS $SAM > ${STR1}_unsorted.bam; 
+samtools sort -@ 24 -o ${STR1}_sorted.bam ${STR1}_unsorted.bam;
+samtools index ${STR1}_sorted.bam; done
+mkdir ./Analysis/riboWaltz
+mkdir ./transcriptomeAligned/sorted
+mv ./transcriptomeAligned/*_sorted.bam* ./transcriptomeAligned/sorted/
+#numerator=$(ls ./transcriptomeAligned/sorted/ | wc -l)
+#denominator=10
+#filenum=$((($((${numerator} / 10)) + $((${numerator} % 10 > 0)))))
+#for n in $(seq 1 $filenum); do mkdir ./transcriptomeAligned/sorted_${n}; done
+#for n in $(seq 1 $filenum); do mv 'ls ./transcriptomeAligned/sorted/* | head' ./transcriptomeAligned/sorted_${n}; done
+
+#mkdir ./transcriptomeAligned/sorted2
+#mv 'ls ./transcriptomeAligned/*_sorted.bam* | head' ./transcriptomeAligned/sorted/
+
+Rscript /N/project/hatoSlate2/RiboSeqPipeline/piesR/piesAlignment_rRNA.R
+
+Rscript /N/project/hatoSlate2/RiboSeqPipeline/piesR/riboWaltz.R
+
+
+
+
+
